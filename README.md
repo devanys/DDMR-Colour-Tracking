@@ -5,6 +5,7 @@ https://github.com/user-attachments/assets/81dc65f6-cd88-4e63-ad33-f30aecf656b5
 
 This repository contains a **Python OpenCV colour-tracking controller** and an **ESP32 WiFi motor driver** used to control a Differential Drive Mobile Robot.  
 The robot tracks **two coloured markers (Red → Green)** and moves based on PID steering and real-time TCP commands.
+<img width="838" height="553" alt="image" src="https://github.com/user-attachments/assets/73da4e1c-6d1b-4da8-b8fa-695f9e0756a7" />
 
 ---
 
