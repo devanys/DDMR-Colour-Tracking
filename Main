@@ -1,0 +1,85 @@
+#include <WiFi.h>
+const char* ssid = " ";
+const char* password = " ";
+
+WiFiServer server(4210);
+WiFiClient client;  
+
+#define ENA   25
+#define IN1   26
+#define IN2   27
+#define ENB   14
+#define IN3   12
+#define IN4   13
+
+int speedVal = 100;
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(ENA, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(ENB, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  stopMotor();
+
+  WiFi.begin(ssid, password);
+  Serial.println("Connecting...");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nConnected!");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  server.begin();
+  Serial.println("TCP Server started!");
+}
+
+void setMotor(int leftSpeed, int rightSpeed) {
+  leftSpeed  = constrain(leftSpeed,  -255, 255);
+  rightSpeed = constrain(rightSpeed, -255, 255);
+
+  if (leftSpeed > 0) { digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);}
+  else if (leftSpeed < 0) { digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);}
+  else { digitalWrite(IN1, LOW); digitalWrite(IN2, LOW); }
+  analogWrite(ENA, abs(leftSpeed));
+
+  if (rightSpeed > 0) { digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);}
+  else if (rightSpeed < 0) { digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);}
+  else { digitalWrite(IN3, LOW); digitalWrite(IN4, LOW); }
+  analogWrite(ENB, abs(rightSpeed));
+}
+
+void maju()       { setMotor(speedVal, speedVal); }
+void mundur()     { setMotor(-speedVal, -speedVal); }
+void belokKiri()  { setMotor(-speedVal, speedVal); }
+void belokKanan() { setMotor(speedVal, -speedVal); }
+void stopMotor()  { setMotor(0, 0); }
+
+void loop() {
+
+ 
+  if (!client || !client.connected()) {
+    client = server.available();
+    return;
+  }
+
+  
+  if (client.available()) {
+    char cmd = client.read();
+    Serial.println(cmd);
+
+    switch (cmd) {
+      case 'F': belokKanan(); break;
+      case 'B': belokKiri();  break;
+      case 'L': mundur();     break;
+      case 'R': maju();       break;
+      case 'S': stopMotor();  break;
+    }
+  }
+}
