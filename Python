@@ -1,0 +1,258 @@
+import cv2
+import numpy as np
+import os
+import json
+import socket
+import time
+import math
+from collections import deque
+
+ESP32_IP = " " 
+PORT = 4210
+
+sock = None
+last_cmd = None
+last_cmd_time = 0.0
+CONNECT_RETRY_COOLDOWN = 2.0
+last_connect_attempt = 0.0
+
+CMD_MIN_INTERVAL = 0.12
+PIXEL_TO_CM_AT_50CM = 0.1
+STOP_DISTANCE_CM = 18.0   
+MIN_TARGET_AREA = 200     
+def load_calibration(file_path="kalibrasi_hsv.json"):
+    if os.path.exists(file_path):
+        with open(file_path, "r") as f:
+            return json.load(f)
+    return {
+        "red": {"H_min": 0, "S_min": 120, "V_min": 70, "H_max": 10, "S_max": 255, "V_max": 255},
+        "green": {"H_min": 40, "S_min": 70, "V_min": 70, "H_max": 90, "S_max": 255, "V_max": 255}
+    }
+
+def connect_socket():
+    global sock, last_connect_attempt
+    now = time.time()
+    if sock:
+        try:
+            sock.send(b'')
+            return True
+        except:
+            close_socket()
+    if now - last_connect_attempt < CONNECT_RETRY_COOLDOWN:
+        return False
+    last_connect_attempt = now
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(3)
+        s.connect((ESP32_IP, PORT))
+        s.settimeout(None)
+        sock = s
+        print("Connected to ESP32:", ESP32_IP, PORT)
+        return True
+    except Exception as e:
+        print("Connect failed:", e)
+        sock = None
+        return False
+
+def close_socket():
+    global sock
+    try:
+        if sock:
+            sock.close()
+    except:
+        pass
+    sock = None
+
+def send_now(cmd):
+    """Send without debounce; returns True on success."""
+    if not connect_socket():
+        return False
+    try:
+        sock.send(cmd.encode())
+        return True
+    except Exception as e:
+        # print("Send error:", e)
+        close_socket()
+        return False
+
+def send(cmd):
+    """Debounced send: only send if changed or interval elapsed."""
+    global last_cmd, last_cmd_time
+    now = time.time()
+    if not isinstance(cmd, str) or len(cmd) == 0:
+        return
+    c = cmd[0]
+    if c == last_cmd and (now - last_cmd_time) < CMD_MIN_INTERVAL:
+        return
+    ok = send_now(c)
+    if ok:
+        last_cmd = c
+        last_cmd_time = now
+        
+def deteksi_warna(hsv, warna_range, frame, nama_warna):
+    lower = np.array([warna_range["H_min"], warna_range["S_min"], warna_range["V_min"]])
+    upper = np.array([warna_range["H_max"], warna_range["S_max"], warna_range["V_max"]])
+    mask = cv2.inRange(hsv, lower, upper)
+    
+    kernel = np.ones((5,5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cx = cy = None
+    bbox = (None, None, None, None)
+    area = 0
+    if contours:
+        c = max(contours, key=cv2.contourArea)
+        area = int(cv2.contourArea(c))
+        x, y, w, h = cv2.boundingRect(c)
+        bbox = (x, y, w, h)
+        M = cv2.moments(c)
+        if M["m00"] > 0:
+            cx = int(M["m10"]/M["m00"])
+            cy = int(M["m01"]/M["m00"])
+            # draw
+            cv2.rectangle(frame, (x,y), (x+w, y+h), (0,255,0) if nama_warna=="hijau" else (0,0,255), 2)
+            cv2.circle(frame, (cx,cy), 6, (0,255,0) if nama_warna=="hijau" else (0,0,255), -1)
+    return mask, (cx, cy), bbox, area
+
+class PID:
+    def __init__(self, kp, ki, kd, windup=1000):
+        self.kp = kp; self.ki = ki; self.kd = kd
+        self.integral = 0.0
+        self.last = 0.0
+        self.windup = windup
+    def update(self, error, dt=1.0):
+        self.integral += error * dt
+        # anti-windup
+        self.integral = max(min(self.integral, self.windup), -self.windup)
+        deriv = (error - self.last) / max(dt, 1e-6)
+        out = self.kp*error + self.ki*self.integral + self.kd*deriv
+        self.last = error
+        return out
+
+pid = PID(kp=0.012, ki=0.0001, kd=0.006)
+
+ERR_BUF = deque(maxlen=5)
+
+def main():
+    calib = load_calibration()
+    # ensure only red & green kept
+    red_cfg = calib.get("red", calib.get("Red", {}))
+    green_cfg = calib.get("green", calib.get("Green", {}))
+
+    cap = cv2.VideoCapture(1)
+    if not cap.isOpened():
+        print("Tidak bisa membuka kamera")
+        return
+
+    FRAME_W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    FRAME_H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    frame_center_x = FRAME_W // 2
+
+    print("Frame size:", FRAME_W, FRAME_H, "center_x:", frame_center_x)
+
+    send("S")
+    time.sleep(0.08)
+
+    last_time = time.time()
+
+    while True:
+        t0 = time.time()
+        ret, frame = cap.read()
+        if not ret:
+            continue
+
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+        mask_r, pos_r, bbox_r, area_r = deteksi_warna(hsv, red_cfg, frame, "merah")
+        mask_g, pos_g, bbox_g, area_g = deteksi_warna(hsv, green_cfg, frame, "hijau")
+
+        cx_r, cy_r = pos_r
+        cx_g, cy_g = pos_g
+        if cx_r is not None and cx_g is not None:
+            cv2.line(frame, (cx_r, cy_r), (cx_g, cy_g), (0,255,255), 2)
+            
+            cv2.line(frame, (frame_center_x, 0), (frame_center_x, FRAME_H), (255,255,0), 1)
+
+            
+            error_px = float(cx_g - cx_r)
+            ERR_BUF.append(error_px)
+            smooth_err = sum(ERR_BUF)/len(ERR_BUF)
+
+            
+            now = time.time()
+            dt = now - last_time
+            last_time = now
+
+            pid_out = pid.update(smooth_err, dt)
+
+            
+            _, _, gw, gh = bbox_g
+            est_dist_cm = None
+            if gw is not None and gw > 0:
+                est_dist_cm = (50 * PIXEL_TO_CM_AT_50CM * 200) / (gw + 1)
+
+            
+            STRAIGHT_THRESH_PX = 20  
+            
+            if est_dist_cm is not None and est_dist_cm <= STOP_DISTANCE_CM:
+                cmd = "S"
+                reason = "near"
+            else:
+                if abs(smooth_err) <= STRAIGHT_THRESH_PX:
+                    cmd = "R"  
+                    reason = "forward"
+                else:
+                    
+                    if pid_out > 0:
+                        cmd = "F"  
+                        reason = "turn_right"
+                    else:
+                        cmd = "B"  
+                        reason = "turn_left"
+
+            
+            cv2.putText(frame, f"Err:{int(smooth_err)} px PID:{pid_out:.2f}", (10,25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
+            if est_dist_cm is not None:
+                cv2.putText(frame, f"Dist:{est_dist_cm:.1f}cm", (10,50),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+            cv2.putText(frame, f"CMD:{cmd} ({reason})", (10,75),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+
+            
+            send(cmd)
+
+        else:
+            
+            send("S")
+            cv2.putText(frame, "Robot/Target missing -> STOP", (10,25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
+
+        
+        display = frame
+        cv2.imshow("Follow Red->Green", display)
+
+        elapsed = time.time() - t0
+        if elapsed < 0.02:
+            time.sleep(0.02 - elapsed)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            break
+        elif key == ord('k'):   
+            print("Open kalibrasi file to edit HSV values, or implement trackbars.")
+        elif key == ord('s'):
+            cur = {"red": red_cfg, "green": green_cfg}
+            with open("kalibrasi_hsv.json", "w") as f:
+                json.dump(cur, f, indent=2)
+            print("Saved kalibrasi_hsv.json")
+
+    send("S")
+    close_socket()
+    cap.release()
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
