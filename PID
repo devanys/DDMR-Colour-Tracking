@@ -1,0 +1,18 @@
+class PID:
+    def __init__(self, kp, ki, kd, windup=1000):
+        self.kp = kp; self.ki = ki; self.kd = kd
+        self.integral = 0.0
+        self.last = 0.0
+        self.windup = windup
+    def update(self, error, dt=1.0):
+        self.integral += error * dt
+        # anti-windup
+        self.integral = max(min(self.integral, self.windup), -self.windup)
+        deriv = (error - self.last) / max(dt, 1e-6)
+        out = self.kp*error + self.ki*self.integral + self.kd*deriv
+        self.last = error
+        return out
+
+pid = PID(kp=0.012, ki=0.0001, kd=0.006)
+
+ERR_BUF = deque(maxlen=5)
