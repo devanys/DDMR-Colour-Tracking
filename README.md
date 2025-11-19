@@ -11,7 +11,7 @@ The robot tracks **two coloured markers (Red → Green)** and moves based on PID
 
 ## 🚀 Features
 
-### Python (mobot_follow_color.py)
+### Python 
 - Dual-colour tracking (Red & Green) using HSV segmentation  
 - PID steering control  
 - Distance estimation from bounding-box width  
